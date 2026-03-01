@@ -1,333 +1,246 @@
-import { useEffect, useMemo, useState } from 'react';
-import * as XLSX from 'xlsx';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  DEFAULT_FILE,
+  FIXED_YEAR,
+  STANDARD_TIME_SLOTS,
+  WEEKDAY_LABEL_MAP,
+  buildIcs,
+  buildPreciseLanguageEvents,
+  extractGroupNumber,
+  extractTeacherFromDescription,
+  findLanguageSheetName,
+  formatDisplayDate,
+  formatMonthDay,
+  formatWeekLabel,
+  getEventSlotKey,
+  getWeekKey,
+  getWeekStart,
+  getWeekdayOffset,
+  parseClassSheet,
+  parseClassSheetName,
+  parseLanguageSheet,
+  readWorkbookFromArrayBuffer,
+  sortNumericStrings,
+} from './lib/timetable.js';
+import {
+  hasSeenSetupPrompt,
+  loadStoredSettings,
+  markSetupPromptSeen,
+  resetStoredSettings,
+  saveStoredSettings,
+} from './lib/storage.js';
 
-const DEFAULT_FILE = '/Timetable_2026Spring.xlsx';
-const FIXED_YEAR = 2026;
-const SHEET_REGEX = /^(20\d{2})([A-Z]{2,}\d*)$/;
-const MONTH_MAP = {
-  jan: 1,
-  feb: 2,
-  mar: 3,
-  apr: 4,
-  may: 5,
-  jun: 6,
-  jul: 7,
-  aug: 8,
-  sep: 9,
-  oct: 10,
-  nov: 11,
-  dec: 12,
-};
+const COURSE_TONES = [
+  { bg: '#6b1f3a', border: '#f5a8bf', text: '#fff6f8' },
+  { bg: '#1f4e7a', border: '#8cc8ff', text: '#edf6ff' },
+  { bg: '#1f6b56', border: '#8ce0c1', text: '#edfff7' },
+  { bg: '#5a3d1c', border: '#f8ca8c', text: '#fff7ed' },
+  { bg: '#4c2d71', border: '#d5b4ff', text: '#f9f0ff' },
+  { bg: '#6a2f2f', border: '#f5adad', text: '#fff2f2' },
+];
 
-const formatNumber = (value) => String(value).padStart(2, '0');
-
-const formatIcsDate = (date) => {
-  return (
-    String(date.getFullYear()) +
-    formatNumber(date.getMonth() + 1) +
-    formatNumber(date.getDate()) +
-    'T' +
-    formatNumber(date.getHours()) +
-    formatNumber(date.getMinutes()) +
-    formatNumber(date.getSeconds())
-  );
-};
-
-const formatIcsDateUtc = (date) => {
-  return (
-    String(date.getUTCFullYear()) +
-    formatNumber(date.getUTCMonth() + 1) +
-    formatNumber(date.getUTCDate()) +
-    'T' +
-    formatNumber(date.getUTCHours()) +
-    formatNumber(date.getUTCMinutes()) +
-    formatNumber(date.getUTCSeconds()) +
-    'Z'
-  );
-};
-
-const escapeIcsText = (value) => {
-  return String(value)
-    .replace(/\\/g, '\\\\')
-    .replace(/\n/g, '\\n')
-    .replace(/;/g, '\\;')
-    .replace(/,/g, '\\,');
-};
-
-const parseTimeRange = (value) => {
-  if (!value) return null;
-  const match = String(value).match(/(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/);
-  if (!match) return null;
-  return {
-    start: { h: Number(match[1]), m: Number(match[2]) },
-    end: { h: Number(match[3]), m: Number(match[4]) },
-  };
-};
-
-const parseDateValue = (value, yearOverride) => {
-  if (!value) return null;
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return new Date(
-      yearOverride ?? value.getFullYear(),
-      value.getMonth(),
-      value.getDate()
-    );
+const hashCourseName = (value) => {
+  const text = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
   }
-  if (typeof value === 'number') {
-    const parsed = XLSX.SSF.parse_date_code(value);
-    if (!parsed) return null;
-    const year = yearOverride ?? parsed.y;
-    return new Date(year, parsed.m - 1, parsed.d);
-  }
-  const text = String(value).replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-  const match = text.match(/(\d{1,2})\s*([A-Za-z]{3,})/);
-  if (match) {
-    const day = Number(match[1]);
-    const monthKey = match[2].slice(0, 3).toLowerCase();
-    const month = MONTH_MAP[monthKey];
-    if (month) {
-      const year = yearOverride ?? new Date().getFullYear();
-      return new Date(year, month - 1, day);
-    }
-  }
-  const fallback = new Date(text);
-  if (!Number.isNaN(fallback.getTime())) {
-    const year = yearOverride ?? fallback.getFullYear();
-    return new Date(year, fallback.getMonth(), fallback.getDate());
-  }
-  return null;
+  return hash;
 };
 
-const cleanCell = (value) => {
-  if (value === undefined || value === null) return '';
-  return String(value).trim();
+const getCourseTone = (summary) => {
+  const index = hashCourseName(summary) % COURSE_TONES.length;
+  return COURSE_TONES[index];
 };
 
-const buildIcs = (events, calendarName) => {
-  const now = new Date();
-  const lines = [
-    'BEGIN:VCALENDAR',
-    'VERSION:2.0',
-    'PRODID:-//Timetable Calendar Export//CN',
-    'CALSCALE:GREGORIAN',
-    'METHOD:PUBLISH',
-    `X-WR-CALNAME:${escapeIcsText(calendarName)}`,
-  ];
-
-  events.forEach((event) => {
-    const uid =
-      (typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
-      `${event.summary}-${event.start.getTime()}`;
-
-    lines.push('BEGIN:VEVENT');
-    lines.push(`UID:${escapeIcsText(uid)}`);
-    lines.push(`DTSTAMP:${formatIcsDateUtc(now)}`);
-    lines.push(`DTSTART:${formatIcsDate(event.start)}`);
-    lines.push(`DTEND:${formatIcsDate(event.end)}`);
-    lines.push(`SUMMARY:${escapeIcsText(event.summary)}`);
-    if (event.location) {
-      lines.push(`LOCATION:${escapeIcsText(event.location)}`);
-    }
-    if (event.description) {
-      lines.push(`DESCRIPTION:${escapeIcsText(event.description)}`);
-    }
-    lines.push('END:VEVENT');
-  });
-
-  lines.push('END:VCALENDAR');
-  return lines.join('\r\n');
+const formatMetaDate = (value) => {
+  if (!value) return '未知';
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '未知';
+  return parsed.toLocaleString('zh-CN', { hour12: false });
 };
 
-const parseClassSheet = (sheet, year, classLabel) => {
-  if (!sheet) return { events: [], sessions: [] };
-  const rows = XLSX.utils.sheet_to_json(sheet, {
-    header: 1,
-    raw: true,
-    blankrows: false,
-  });
-  if (rows.length < 3) return { events: [], sessions: [] };
+function Modal({ title, onClose, children, actions, panelClassName = '' }) {
+  const [isClosing, setIsClosing] = useState(false);
+  const closeTimerRef = useRef(null);
 
-  const isSessionHeader = (cell) =>
-    typeof cell === 'string' && cell.toLowerCase().includes('session');
-  const isDateHeader = (cell) =>
-    typeof cell === 'string' && cell.toLowerCase().includes('date');
-  const hasTimeCell = (row) => row?.some((cell) => parseTimeRange(cell));
+  const requestClose = useCallback(() => {
+    if (closeTimerRef.current) return;
+    setIsClosing(true);
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      onClose();
+    }, 170);
+  }, [onClose]);
 
-  let headerRowIndex = rows.findIndex(
-    (row) => row?.some(isSessionHeader) && row?.some(isDateHeader)
-  );
-  if (headerRowIndex === -1) {
-    headerRowIndex = rows.findIndex(
-      (row) => row?.filter(isSessionHeader).length >= 2
-    );
-  }
-  if (headerRowIndex === -1) return { events: [], sessions: [] };
-
-  const timeRowOffset = rows
-    .slice(headerRowIndex + 1)
-    .findIndex((row) => hasTimeCell(row));
-  if (timeRowOffset === -1) return { events: [], sessions: [] };
-
-  const timeRowIndex = headerRowIndex + 1 + timeRowOffset;
-  const headerRow = rows[headerRowIndex] || [];
-  const timeRow = rows[timeRowIndex] || [];
-  const dataStartIndex = timeRowIndex + 1;
-
-  const dateColIndex =
-    headerRow.findIndex(isDateHeader) !== -1
-      ? headerRow.findIndex(isDateHeader)
-      : 1;
-
-  const sessionCols = [];
-  headerRow.forEach((cell, idx) => {
-    if (isSessionHeader(cell)) sessionCols.push(idx);
-  });
-
-  const sessions = sessionCols.map((col, index) => {
-    const timeRange = cleanCell(timeRow[col]);
-    const times = parseTimeRange(timeRange);
-    return {
-      col,
-      label: cleanCell(headerRow[col]) || `Session ${index + 1}`,
-      timeRange,
-      times,
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') requestClose();
     };
-  });
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [requestClose]);
 
-  const events = [];
-  rows.slice(dataStartIndex).forEach((row) => {
-    const dateValue = row?.[dateColIndex];
-    const date = parseDateValue(dateValue, year);
-    if (!date) return;
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current) {
+        window.clearTimeout(closeTimerRef.current);
+        closeTimerRef.current = null;
+      }
+    };
+  }, []);
 
-    sessions.forEach((session) => {
-      if (!session.times) return;
-      const course = cleanCell(row?.[session.col]);
-      if (!course || /holiday/i.test(course)) return;
-      const teacher = cleanCell(row?.[session.col + 1]);
-      const room = cleanCell(row?.[session.col + 2]);
-
-      const start = new Date(
-        date.getFullYear(),
-        date.getMonth(),
-        date.getDate(),
-        session.times.start.h,
-        session.times.start.m
-      );
-      const end = new Date(
-        date.getFullYear(),
-        date.getMonth(),
-        date.getDate(),
-        session.times.end.h,
-        session.times.end.m
-      );
-
-      const descriptionParts = [`班级: ${classLabel}`, `节次: ${session.label}`];
-      if (teacher) descriptionParts.push(`教师: ${teacher}`);
-      if (room) descriptionParts.push(`教室: ${room}`);
-
-      events.push({
-        summary: course,
-        location: room,
-        description: descriptionParts.join('\n'),
-        start,
-        end,
-      });
-    });
-  });
-
-  return { events, sessions };
-};
-
-const formatPreviewDate = (date) =>
-  date.toLocaleDateString('zh-CN', {
-    month: 'short',
-    day: 'numeric',
-    weekday: 'short',
-  });
-
-const formatPreviewTime = (date) =>
-  date.toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-
-const getWeekStart = (date) => {
-  const base = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const day = base.getDay();
-  const diff = (day + 6) % 7;
-  base.setDate(base.getDate() - diff);
-  base.setHours(0, 0, 0, 0);
-  return base;
-};
-
-const getWeekKey = (date) => {
-  const start = getWeekStart(date);
-  return `${start.getFullYear()}-${formatNumber(start.getMonth() + 1)}-${formatNumber(
-    start.getDate()
-  )}`;
-};
-
-const isSameDay = (a, b) =>
-  a.getFullYear() === b.getFullYear() &&
-  a.getMonth() === b.getMonth() &&
-  a.getDate() === b.getDate();
-
-const formatWeekLabel = (start) => {
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);
-  return `${formatPreviewDate(start)} - ${formatPreviewDate(end)}`;
-};
+  return (
+    <div
+      className={`modal-backdrop ${isClosing ? 'closing' : ''}`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          requestClose();
+        }
+      }}
+    >
+      <section
+        className={`modal-panel ${panelClassName}`.trim()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
+        <div className="modal-head">
+          <h2>{title}</h2>
+          <button type="button" className="icon-btn" onClick={requestClose} aria-label="关闭">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        {children}
+        {actions ? <div className="modal-actions">{actions}</div> : null}
+      </section>
+    </div>
+  );
+}
 
 export default function App() {
+  const storedSettings = useMemo(() => loadStoredSettings(), []);
+  const firstRunPromptedRef = useRef(false);
+  const weekInitRef = useRef(false);
+  const swipeRef = useRef(null);
+  const dragOffsetRef = useRef(0);
+
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('Timetable_2026Spring.xlsx');
-  const [selectedGrade, setSelectedGrade] = useState('');
-  const [selectedClass, setSelectedClass] = useState('');
+  const [sourceLabel, setSourceLabel] = useState(DEFAULT_FILE);
+  const [buildDateText, setBuildDateText] = useState('未知');
+  const [selectedGrade, setSelectedGrade] = useState(storedSettings.selectedGrade || '');
+  const [selectedMajor, setSelectedMajor] = useState(storedSettings.selectedMajor || '');
+  const [selectedClass, setSelectedClass] = useState(storedSettings.selectedClass || '');
+  const [germanGroup, setGermanGroup] = useState(storedSettings.germanGroup || '');
+  const [englishGroup, setEnglishGroup] = useState(storedSettings.englishGroup || '');
+  const [selectedWeek, setSelectedWeek] = useState(storedSettings.selectedWeek || '');
+
   const [events, setEvents] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [languageNotes, setLanguageNotes] = useState([]);
   const [error, setError] = useState('');
-  const [selectedWeek, setSelectedWeek] = useState('');
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isWeekPickerOpen, setIsWeekPickerOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
+  const [dragOffset, setDragOffset] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
 
   const classSheets = useMemo(() => {
     if (!workbook) return [];
-    return workbook.SheetNames.map((name) => {
-      const match = name.match(SHEET_REGEX);
-      if (!match) return null;
-      return { sheetName: name, grade: match[1], classCode: match[2] };
-    })
+    return workbook.SheetNames.map((name) => parseClassSheetName(name))
       .filter(Boolean)
       .sort((a, b) =>
         a.grade === b.grade
-          ? a.classCode.localeCompare(b.classCode)
+          ? a.major === b.major
+            ? a.classCode.localeCompare(b.classCode)
+            : a.major.localeCompare(b.major)
           : a.grade.localeCompare(b.grade)
       );
   }, [workbook]);
 
-  const gradeOptions = useMemo(() => {
-    return [...new Set(classSheets.map((item) => item.grade))].sort();
-  }, [classSheets]);
+  const gradeOptions = useMemo(
+    () => [...new Set(classSheets.map((item) => item.grade))].sort(),
+    [classSheets]
+  );
+
+  const majorOptions = useMemo(() => {
+    if (!selectedGrade) return [];
+    return [
+      ...new Set(
+        classSheets
+          .filter((item) => item.grade === selectedGrade)
+          .map((item) => item.major)
+      ),
+    ].sort();
+  }, [classSheets, selectedGrade]);
 
   const classOptions = useMemo(() => {
-    if (!selectedGrade) return [];
+    if (!selectedGrade || !selectedMajor) return [];
     return classSheets
-      .filter((item) => item.grade === selectedGrade)
+      .filter(
+        (item) => item.grade === selectedGrade && item.major === selectedMajor
+      )
       .map((item) => item.classCode);
-  }, [classSheets, selectedGrade]);
+  }, [classSheets, selectedGrade, selectedMajor]);
 
   const selectedSheet = useMemo(() => {
     return classSheets.find(
-      (item) => item.grade === selectedGrade && item.classCode === selectedClass
+      (item) =>
+        item.grade === selectedGrade &&
+        item.major === selectedMajor &&
+        item.classCode === selectedClass
     );
-  }, [classSheets, selectedGrade, selectedClass]);
+  }, [classSheets, selectedGrade, selectedMajor, selectedClass]);
 
-  const dateRange = useMemo(() => {
-    if (!events.length) return null;
-    const sorted = [...events].sort((a, b) => a.start - b.start);
-    return { start: sorted[0].start, end: sorted[sorted.length - 1].start };
-  }, [events]);
+  const englishSheetName = useMemo(
+    () => findLanguageSheetName(workbook, selectedGrade, 'english'),
+    [workbook, selectedGrade]
+  );
+  const germanSheetName = useMemo(
+    () => findLanguageSheetName(workbook, selectedGrade, 'german'),
+    [workbook, selectedGrade]
+  );
+
+  const englishLanguageMap = useMemo(() => {
+    if (!workbook || !englishSheetName) return new Map();
+    return parseLanguageSheet(workbook.Sheets[englishSheetName], 'english');
+  }, [workbook, englishSheetName]);
+
+  const germanLanguageMap = useMemo(() => {
+    if (!workbook || !germanSheetName) return new Map();
+    return parseLanguageSheet(workbook.Sheets[germanSheetName], 'german');
+  }, [workbook, germanSheetName]);
+
+  const englishGroupOptions = useMemo(() => {
+    const options = new Set();
+    englishLanguageMap.forEach((cell) => {
+      cell.entries.forEach((entry) => {
+        if (selectedMajor && !entry.code.includes(selectedMajor)) return;
+        const groupNo = extractGroupNumber(entry.code, 'english');
+        if (groupNo) options.add(groupNo);
+      });
+    });
+    return sortNumericStrings(options);
+  }, [englishLanguageMap, selectedMajor]);
+
+  const germanGroupOptions = useMemo(() => {
+    const options = new Set();
+    const majorToken = `${String(selectedGrade)}${String(selectedMajor || '').toUpperCase()}`;
+    germanLanguageMap.forEach((cell) => {
+      if (cell.header && majorToken) {
+        const header = cell.header.replace(/\s+/g, '').toUpperCase();
+        if (!header.includes(majorToken)) return;
+      }
+      cell.entries.forEach((entry) => {
+        const groupNo = extractGroupNumber(entry.code, 'german');
+        if (groupNo) options.add(groupNo);
+      });
+    });
+    return sortNumericStrings(options);
+  }, [germanLanguageMap, selectedGrade, selectedMajor]);
 
   const weekOptions = useMemo(() => {
     if (!events.length) return [];
@@ -339,58 +252,175 @@ export default function App() {
     return [...keys.values()].sort((a, b) => a - b);
   }, [events]);
 
+  const selectedWeekIndex = useMemo(() => {
+    return weekOptions.findIndex((week) => getWeekKey(week) === selectedWeek);
+  }, [weekOptions, selectedWeek]);
+
+  const selectedWeekStart = useMemo(() => {
+    if (selectedWeekIndex >= 0) return weekOptions[selectedWeekIndex];
+    return weekOptions[0] || null;
+  }, [selectedWeekIndex, weekOptions]);
+
   const weeklyEvents = useMemo(() => {
-    if (!selectedWeek) return [];
-    return events.filter((event) => getWeekKey(event.start) === selectedWeek);
-  }, [events, selectedWeek]);
+    if (!selectedWeekStart) return [];
+    const key = getWeekKey(selectedWeekStart);
+    return events.filter((event) => getWeekKey(event.start) === key);
+  }, [events, selectedWeekStart]);
 
-  const weekDays = useMemo(() => {
-    if (!selectedWeek) return [];
-    const [year, month, day] = selectedWeek.split('-').map(Number);
-    const start = new Date(year, month - 1, day);
-    return Array.from({ length: 7 }, (_, idx) => {
-      const date = new Date(start);
-      date.setDate(start.getDate() + idx);
-      const dayEvents = weeklyEvents
-        .filter((event) => isSameDay(event.start, date))
-        .sort((a, b) => a.start - b.start);
-      return { date, events: dayEvents };
+  const weekColumns = useMemo(() => {
+    if (!selectedWeekStart) return [];
+    const monday = new Date(selectedWeekStart);
+    const includeSaturday = weeklyEvents.some((event) => event.start.getDay() === 6);
+    const includeSunday = weeklyEvents.some((event) => event.start.getDay() === 0);
+    const hasWeekendCourse = includeSaturday || includeSunday;
+    const weekdays = [1, 2, 3, 4, 5];
+    if (hasWeekendCourse) weekdays.push(6, 0);
+
+    return weekdays.map((weekday) => {
+      const date = new Date(monday);
+      date.setDate(monday.getDate() + getWeekdayOffset(weekday));
+      return { weekday, label: WEEKDAY_LABEL_MAP[weekday], date };
     });
-  }, [selectedWeek, weeklyEvents]);
+  }, [selectedWeekStart, weeklyEvents]);
 
-  const loadWorkbook = async (arrayBuffer, name) => {
-    try {
-      const wb = XLSX.read(arrayBuffer, { cellDates: true });
-      setWorkbook(wb);
-      setFileName(name);
-      setError('');
-    } catch (err) {
-      setError('文件解析失败，请确认是有效的 .xlsx 文件。');
-      setWorkbook(null);
-    }
+  const weeklyEventMap = useMemo(() => {
+    const map = new Map();
+    weeklyEvents.forEach((event) => {
+      const key = `${event.start.getDay()}|${getEventSlotKey(event)}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(event);
+    });
+    map.forEach((items) =>
+      items.sort((a, b) =>
+        a.start - b.start || a.summary.localeCompare(b.summary, 'zh-Hans-CN')
+      )
+    );
+    return map;
+  }, [weeklyEvents]);
+
+  const displayDate = selectedWeekStart ? formatDisplayDate(selectedWeekStart) : formatDisplayDate(new Date());
+  const displayWeekNo = selectedWeekIndex >= 0 ? selectedWeekIndex + 1 : 1;
+
+  const applyDragOffset = (value) => {
+    dragOffsetRef.current = value;
+    setDragOffset(value);
   };
 
-  const loadDefaultFile = async () => {
-    try {
-      const response = await fetch(DEFAULT_FILE);
-      if (!response.ok) throw new Error('fetch failed');
-      const buffer = await response.arrayBuffer();
-      await loadWorkbook(buffer, 'Timetable_2026Spring.xlsx');
-    } catch (err) {
-      setError('示例课表加载失败，请手动选择文件。');
+  const shiftWeek = (offset) => {
+    if (!weekOptions.length || selectedWeekIndex < 0) return false;
+    const target = Math.max(0, Math.min(weekOptions.length - 1, selectedWeekIndex + offset));
+    if (target === selectedWeekIndex) return false;
+    setSelectedWeek(getWeekKey(weekOptions[target]));
+    return true;
+  };
+
+  const handleSwipeStart = (event) => {
+    if (!event.touches?.length) return;
+    const touch = event.touches[0];
+    swipeRef.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      locked: false,
+      horizontal: false,
+    };
+    setIsDragging(false);
+    applyDragOffset(0);
+  };
+
+  const handleSwipeMove = (event) => {
+    if (!swipeRef.current || !event.touches?.length) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - swipeRef.current.x;
+    const dy = touch.clientY - swipeRef.current.y;
+
+    if (!swipeRef.current.locked) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      swipeRef.current.locked = true;
+      swipeRef.current.horizontal = Math.abs(dx) > Math.abs(dy);
     }
+
+    if (!swipeRef.current.horizontal) return;
+
+    const canShiftPrev = selectedWeekIndex > 0;
+    const canShiftNext = selectedWeekIndex >= 0 && selectedWeekIndex < weekOptions.length - 1;
+    let displayDx = dx;
+    if ((dx > 0 && !canShiftPrev) || (dx < 0 && !canShiftNext)) {
+      displayDx *= 0.35;
+    }
+    displayDx = Math.max(-140, Math.min(140, displayDx));
+
+    if (!isDragging) setIsDragging(true);
+    applyDragOffset(displayDx);
+  };
+
+  const handleSwipeCancel = () => {
+    swipeRef.current = null;
+    setIsDragging(false);
+    applyDragOffset(0);
+  };
+
+  const handleSwipeEnd = (event) => {
+    if (!swipeRef.current || !event.changedTouches?.length) {
+      handleSwipeCancel();
+      return;
+    }
+    const wasHorizontal = swipeRef.current.horizontal;
+    swipeRef.current = null;
+
+    if (!wasHorizontal) {
+      handleSwipeCancel();
+      return;
+    }
+
+    const finalOffset = dragOffsetRef.current;
+    const threshold = 56;
+    const direction = finalOffset <= -threshold ? 1 : finalOffset >= threshold ? -1 : 0;
+    const shifted = direction ? shiftWeek(direction) : false;
+
+    setIsDragging(false);
+    if (shifted) {
+      applyDragOffset(direction > 0 ? -84 : 84);
+      requestAnimationFrame(() => applyDragOffset(0));
+      return;
+    }
+    applyDragOffset(0);
   };
 
   useEffect(() => {
+    const loadDefaultFile = async () => {
+      try {
+        const response = await fetch(DEFAULT_FILE);
+        if (!response.ok) throw new Error('fetch failed');
+        const buffer = await response.arrayBuffer();
+        const wb = readWorkbookFromArrayBuffer(buffer);
+        const headerBuildDate = response.headers.get('last-modified');
+        const workbookBuildDate = wb?.Props?.ModifiedDate || wb?.Props?.CreatedDate;
+
+        setWorkbook(wb);
+        setFileName('Timetable_2026Spring.xlsx');
+        // setSourceLabel(`Timetable_2026Spring.xlsx (${DEFAULT_FILE})`);
+        setBuildDateText(formatMetaDate(workbookBuildDate || headerBuildDate));
+        setError('');
+      } catch (err) {
+        setError('示例课表加载失败，请检查文件路径。');
+      }
+    };
     loadDefaultFile();
   }, []);
 
   useEffect(() => {
     if (!gradeOptions.length) return;
-    if (!selectedGrade) {
+    if (!selectedGrade || !gradeOptions.includes(selectedGrade)) {
       setSelectedGrade(gradeOptions[0]);
     }
   }, [gradeOptions, selectedGrade]);
+
+  useEffect(() => {
+    if (!majorOptions.length) return;
+    if (!selectedMajor || !majorOptions.includes(selectedMajor)) {
+      setSelectedMajor(majorOptions[0]);
+    }
+  }, [majorOptions, selectedMajor]);
 
   useEffect(() => {
     if (!classOptions.length) return;
@@ -400,30 +430,107 @@ export default function App() {
   }, [classOptions, selectedClass]);
 
   useEffect(() => {
+    if (!germanGroupOptions.length) {
+      return;
+    }
+    if (!germanGroup || !germanGroupOptions.includes(germanGroup)) {
+      setGermanGroup(germanGroupOptions[0]);
+    }
+  }, [germanGroupOptions, germanGroup]);
+
+  useEffect(() => {
+    if (!englishGroupOptions.length) {
+      return;
+    }
+    if (!englishGroup || !englishGroupOptions.includes(englishGroup)) {
+      setEnglishGroup(englishGroupOptions[0]);
+    }
+  }, [englishGroupOptions, englishGroup]);
+
+  useEffect(() => {
     if (!workbook || !selectedSheet) {
       setEvents([]);
       setSessions([]);
+      setLanguageNotes([]);
       return;
     }
+
     const parsed = parseClassSheet(
       workbook.Sheets[selectedSheet.sheetName],
       FIXED_YEAR,
       selectedSheet.sheetName
     );
-    setEvents(parsed.events);
+    const precise = buildPreciseLanguageEvents({
+      workbook,
+      grade: selectedSheet.grade,
+      major: selectedSheet.major,
+      classLabel: selectedSheet.sheetName,
+      languageSlots: parsed.languageSlots,
+      englishGroup,
+      germanGroup,
+    });
+
+    setEvents([...parsed.events, ...precise.events].sort((a, b) => a.start - b.start));
     setSessions(parsed.sessions);
-  }, [workbook, selectedSheet]);
+    setLanguageNotes(precise.notes);
+  }, [workbook, selectedSheet, englishGroup, germanGroup]);
 
   useEffect(() => {
     if (!weekOptions.length) {
-      setSelectedWeek('');
+      weekInitRef.current = false;
       return;
     }
-    const key = getWeekKey(weekOptions[0]);
-    if (!selectedWeek || !weekOptions.some((week) => getWeekKey(week) === selectedWeek)) {
-      setSelectedWeek(key);
+
+    const isCurrentValid = weekOptions.some((week) => getWeekKey(week) === selectedWeek);
+    if (!weekInitRef.current) {
+      const todayWeekKey = getWeekKey(new Date());
+      const hasTodayWeek = weekOptions.some((week) => getWeekKey(week) === todayWeekKey);
+      if (hasTodayWeek) {
+        setSelectedWeek(todayWeekKey);
+      } else if (!isCurrentValid) {
+        setSelectedWeek(getWeekKey(weekOptions[0]));
+      }
+      weekInitRef.current = true;
+      return;
+    }
+
+    if (!isCurrentValid) {
+      setSelectedWeek(getWeekKey(weekOptions[0]));
     }
   }, [weekOptions, selectedWeek]);
+
+  useEffect(() => {
+    const previous = loadStoredSettings();
+    saveStoredSettings({
+      selectedGrade,
+      selectedMajor,
+      selectedClass,
+      germanGroup,
+      englishGroup,
+      selectedWeek: weekOptions.length ? selectedWeek : previous.selectedWeek || selectedWeek,
+    });
+  }, [
+    selectedGrade,
+    selectedMajor,
+    selectedClass,
+    germanGroup,
+    englishGroup,
+    selectedWeek,
+    weekOptions.length,
+  ]);
+
+  useEffect(() => {
+    if (!workbook || firstRunPromptedRef.current) return;
+    const shouldForcePrompt = !hasSeenSetupPrompt();
+    const hasStoredSelection = Boolean(
+      storedSettings.selectedGrade || storedSettings.selectedMajor || storedSettings.selectedClass
+    );
+    if (shouldForcePrompt || !hasStoredSelection) {
+      setIsSettingsOpen(true);
+      markSetupPromptSeen();
+      firstRunPromptedRef.current = true;
+    }
+  }, [workbook, storedSettings]);
 
   const handleExport = () => {
     if (!events.length || !selectedSheet) return;
@@ -438,51 +545,162 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handleResetConfirmed = () => {
+    resetStoredSettings();
+    firstRunPromptedRef.current = false;
+    weekInitRef.current = false;
+    setSelectedGrade('');
+    setSelectedMajor('');
+    setSelectedClass('');
+    setGermanGroup('');
+    setEnglishGroup('');
+    setSelectedWeek('');
+    setIsResetConfirmOpen(false);
+    setIsWeekPickerOpen(false);
+    setIsAboutOpen(false);
+    setIsSettingsOpen(true);
+  };
+
   return (
-    <div className="page">
-      <div className="orb orb-1" aria-hidden="true" />
-      <div className="orb orb-2" aria-hidden="true" />
-      <div className="app">
-        <header className="hero">
-          <div>
-            <h1>BiUH 日历导出</h1>
-            <p className="subtitle">
-              by MoeLeak
-            </p>
-          </div>
-          <div className="hero-card">
-            <div>
-              <h3>当前课表</h3>
-              <p className="hero-file">{fileName}</p>
-            </div>
-            <div className="hero-meta">
-              <span>班级表数量</span>
-              <strong>{classSheets.length}</strong>
-            </div>
-          </div>
-        </header>
+    <div className="app-shell">
+      <header className="top-app-bar">
+        <button type="button" className="week-trigger" onClick={() => setIsWeekPickerOpen(true)}>
+          <strong>{displayDate}</strong>
+          <span>第 {displayWeekNo} 周</span>
+        </button>
+        <div className="top-actions">
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setIsResetConfirmOpen(true)}
+            aria-label="重置设置"
+          >
+            <span className="material-symbols-outlined">replay</span>
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={handleExport}
+            aria-label="导出课表"
+            disabled={!events.length}
+          >
+            <span className="material-symbols-outlined">download</span>
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setIsAboutOpen(true)}
+            aria-label="关于"
+          >
+            <span className="material-symbols-outlined">info</span>
+          </button>
+        </div>
+      </header>
 
-        {error ? <div className="alert">{error}</div> : null}
+      {error ? <div className="alert-banner">{error}</div> : null}
 
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <span className="badge">STEP 01</span>
-              <h2>选择年级与班级</h2>
-              <p>自动识别工作表，支持多学期文件。</p>
+      <main
+        className="timetable-main"
+        onTouchStart={handleSwipeStart}
+        onTouchMove={handleSwipeMove}
+        onTouchEnd={handleSwipeEnd}
+        onTouchCancel={handleSwipeCancel}
+      >
+        {events.length ? (
+          <>
+            <p className="swipe-tip">左右滑动可切换周</p>
+            <div
+              className={`table-scroll swipe-track ${isDragging ? 'dragging' : ''}`}
+              style={{ transform: `translate3d(${dragOffset}px, 0, 0)` }}
+            >
+              <table className="schedule-table">
+                <thead>
+                  <tr>
+                    <th className="session-head">节次</th>
+                    {weekColumns.map((column) => (
+                      <th key={`${column.weekday}-${column.date.toISOString()}`}>
+                        <span>{column.label}</span>
+                        <small>{formatMonthDay(column.date)}</small>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {STANDARD_TIME_SLOTS.map((slot) => (
+                    <tr key={slot.id}>
+                      <th className="session-cell">
+                        <strong>{slot.id}</strong>
+                        <span>{slot.start}</span>
+                        <span>{slot.end}</span>
+                      </th>
+                      {weekColumns.map((column) => {
+                        const key = `${column.weekday}|${slot.start}-${slot.end}`;
+                        const cellEvents = weeklyEventMap.get(key) || [];
+                        return (
+                          <td key={`${slot.id}-${column.weekday}`}>
+                            {cellEvents.length ? (
+                              <div className="course-stack">
+                                {cellEvents.map((event, index) => {
+                                  const tone = getCourseTone(event.summary);
+                                  const teacher = extractTeacherFromDescription(event.description);
+                                  return (
+                                    <article
+                                      className="course-card"
+                                      key={`${event.summary}-${index}-${event.start.getTime()}`}
+                                      style={{
+                                        backgroundColor: tone.bg,
+                                        borderColor: tone.border,
+                                        color: tone.text,
+                                      }}
+                                    >
+                                      <strong>{event.summary}</strong>
+                                      <p>@{event.location || '场地待定'}</p>
+                                      {teacher ? <p>{teacher}</p> : null}
+                                    </article>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <div className="panel-stat">
-              <span>可导出课程数</span>
-              <strong>{events.length}</strong>
-            </div>
+          </>
+        ) : (
+          <div className="empty-state">
+            <p>暂无课程数据，请先完成课程设置。</p>
           </div>
+        )}
+      </main>
+
+      <button
+        type="button"
+        className="fab"
+        onClick={() => setIsSettingsOpen(true)}
+        aria-label="课程设置"
+      >
+        <span className="material-symbols-outlined">settings</span>
+      </button>
+
+      {isSettingsOpen ? (
+        <Modal
+          title="课程设置"
+          onClose={() => setIsSettingsOpen(false)}
+          actions={
+            <button type="button" className="filled-btn" onClick={() => setIsSettingsOpen(false)}>
+              完成
+            </button>
+          }
+        >
+          <p className="modal-note">设置会自动保存，下次打开会直接恢复</p>
           <div className="field-grid">
-            <label className="field">
+            <label>
               <span>年级</span>
-              <select
-                value={selectedGrade}
-                onChange={(event) => setSelectedGrade(event.target.value)}
-              >
+              <select value={selectedGrade} onChange={(event) => setSelectedGrade(event.target.value)}>
                 {gradeOptions.map((grade) => (
                   <option key={grade} value={grade}>
                     {grade}
@@ -490,12 +708,19 @@ export default function App() {
                 ))}
               </select>
             </label>
-            <label className="field">
+            <label>
+              <span>专业</span>
+              <select value={selectedMajor} onChange={(event) => setSelectedMajor(event.target.value)}>
+                {majorOptions.map((major) => (
+                  <option key={major} value={major}>
+                    {major}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               <span>班级</span>
-              <select
-                value={selectedClass}
-                onChange={(event) => setSelectedClass(event.target.value)}
-              >
+              <select value={selectedClass} onChange={(event) => setSelectedClass(event.target.value)}>
                 {classOptions.map((classCode) => (
                   <option key={classCode} value={classCode}>
                     {classCode}
@@ -503,101 +728,114 @@ export default function App() {
                 ))}
               </select>
             </label>
+            <label>
+              <span>德语分组</span>
+              <select value={germanGroup} onChange={(event) => setGermanGroup(event.target.value)}>
+                <option value="">{germanGroupOptions.length ? '请选择' : '无可选分组'}</option>
+                {germanGroupOptions.map((groupNo) => (
+                  <option key={groupNo} value={groupNo}>
+                    {groupNo}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>英语分组</span>
+              <select value={englishGroup} onChange={(event) => setEnglishGroup(event.target.value)}>
+                <option value="">{englishGroupOptions.length ? '请选择' : '无可选分组'}</option>
+                {englishGroupOptions.map((groupNo) => (
+                  <option key={groupNo} value={groupNo}>
+                    {groupNo}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
-          <div className="session-tags">
-            {sessions.map((session) => (
-              <span key={session.col}>
-                {session.label} · {session.timeRange || '时间待定'}
-              </span>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <span className="badge">STEP 02</span>
-              <h2>导出到日历</h2>
-              <p>生成 .ics 文件，可导入 Apple / Google / Outlook 日历。</p>
+          {/* sessions.length */ false ? (
+            <div className="chips">
+              {sessions.map((session) => (
+                <span key={session.col}>
+                  {session.label} {session.timeRange ? `· ${session.timeRange}` : ''}
+                </span>
+              ))}
             </div>
-            <button
-              className="primary"
-              type="button"
-              onClick={handleExport}
-              disabled={!events.length}
-            >
-              导出 .ics
+          ) : null}
+          {languageNotes.length ? (
+            <div className="note-list">
+              {languageNotes.map((note) => (
+                <p key={note}>{note}</p>
+              ))}
+            </div>
+          ) : null}
+        </Modal>
+      ) : null}
+
+      {isWeekPickerOpen ? (
+        <Modal title="切换周次" onClose={() => setIsWeekPickerOpen(false)} panelClassName="week-modal">
+          <div className="week-list">
+            {weekOptions.map((week, index) => {
+              const key = getWeekKey(week);
+              const active = key === selectedWeek;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={`week-item ${active ? 'active' : ''}`}
+                  onClick={() => {
+                    setSelectedWeek(key);
+                    setIsWeekPickerOpen(false);
+                  }}
+                >
+                  <strong>第 {index + 1} 周</strong>
+                  <span>{formatWeekLabel(week)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Modal>
+      ) : null}
+
+      {isAboutOpen ? (
+        <Modal
+          title="关于"
+          onClose={() => setIsAboutOpen(false)}
+          actions={
+            <button type="button" className="filled-btn" onClick={() => setIsAboutOpen(false)}>
+              知道了
             </button>
+          }
+        >
+          <div className="about-content">
+            <h3>BiUH 超级云课表</h3>
+            <p>作者：李幸值、陈俊豪</p>
+            <p>当前课表源：{sourceLabel}</p>
+            <p>课表文件构建日期：{buildDateText}</p>
           </div>
-          <div className="export-meta">
-            {dateRange ? (
-              <>
-                覆盖日期：{formatPreviewDate(dateRange.start)} 至{' '}
-                {formatPreviewDate(dateRange.end)}
-              </>
-            ) : (
-              '请选择有效班级以生成日历。'
-            )}
-          </div>
-          <div className="preview">
-            <h3>课程预览（按周）</h3>
-            {events.length ? (
-              <>
-                <div className="week-tabs">
-                  {weekOptions.map((week) => {
-                    const key = getWeekKey(week);
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        className={`week-tab ${key === selectedWeek ? 'active' : ''}`}
-                        onClick={() => setSelectedWeek(key)}
-                      >
-                        {formatWeekLabel(week)}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="week-grid">
-                  {weekDays.map((day) => (
-                    <div className="week-day" key={day.date.toISOString()}>
-                      <div className="week-day-head">
-                        <span>{formatPreviewDate(day.date)}</span>
-                        <span>{day.events.length} 节</span>
-                      </div>
-                      {day.events.length ? (
-                        <div className="week-day-events">
-                          {day.events.map((event, index) => (
-                            <div
-                              className="week-event"
-                              key={`${event.summary}-${index}-${event.start.getTime()}`}
-                            >
-                              <div>
-                                <strong>{event.summary}</strong>
-                                <p>
-                                  {formatPreviewTime(event.start)} -{' '}
-                                  {formatPreviewTime(event.end)}
-                                </p>
-                              </div>
-                              <span className="room">
-                                {event.location || '教室待定'}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="preview-empty">当天无课程</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="preview-empty">暂无课程数据，请确认年级班级选择。</p>
-            )}
-          </div>
-        </section>
-      </div>
+        </Modal>
+      ) : null}
+
+      {isResetConfirmOpen ? (
+        <Modal
+          title="重置设置"
+          onClose={() => setIsResetConfirmOpen(false)}
+          actions={
+            <>
+              <button
+                type="button"
+                className="text-btn"
+                onClick={() => setIsResetConfirmOpen(false)}
+              >
+                取消
+              </button>
+              <button type="button" className="filled-btn" onClick={handleResetConfirmed}>
+                重置
+              </button>
+            </>
+          }
+        >
+          <p className="modal-note">将清空本地设置并重新打开课程设置。</p>
+        </Modal>
+      ) : null}
     </div>
   );
 }
