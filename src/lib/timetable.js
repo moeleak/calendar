@@ -337,6 +337,50 @@ export const findLanguageSheetName = (workbook, grade, language) => {
   return includesGrade || candidates[0];
 };
 
+const findLanguageSheets = (workbook, language) => {
+  if (!workbook) return [];
+  return workbook.SheetNames.filter((name) =>
+    name.toLowerCase().includes(language.toLowerCase())
+  );
+};
+
+const shouldSkipLanguageSheet = (name) => /2025/.test(String(name || ''));
+
+const parseLanguageLine = (line, language) => {
+  const clean = cleanCell(line);
+  if (!clean) return null;
+  const englishMatch = clean.match(/^([A-Z]{2,}_[0-9]+)\s+([^,]+?)\s*,\s*([A-Za-z0-9-]+)$/);
+  if (englishMatch) {
+    return {
+      code: cleanCell(englishMatch[1]).toUpperCase(),
+      teacher: cleanCell(englishMatch[2]),
+      room: cleanCell(englishMatch[3]),
+    };
+  }
+  const germanMatch = clean.match(/^(G\d+)\s+([^,]+?)\s*,\s*([A-Za-z0-9-]+)$/i);
+  if (germanMatch) {
+    return {
+      code: cleanCell(germanMatch[1]).toUpperCase(),
+      teacher: cleanCell(germanMatch[2]),
+      room: cleanCell(germanMatch[3]),
+    };
+  }
+  if (language === 'german' && /german/i.test(clean)) {
+    const parts = clean
+      .split('-')
+      .map((part) => cleanCell(part))
+      .filter(Boolean);
+    if (parts.length >= 3) {
+      return {
+        code: parts.slice(1, -2).join('-'),
+        teacher: parts[parts.length - 2] || '',
+        room: parts[parts.length - 1] || '',
+      };
+    }
+  }
+  return null;
+};
+
 const parseLanguageEntries = (text, language) => {
   const content = String(text || '').replace(/\r/g, '\n');
   const lines = content
@@ -346,19 +390,10 @@ const parseLanguageEntries = (text, language) => {
   const header =
     lines.find((line) => /20\d{2}/.test(line) && line.includes('&')) || '';
   const entries = [];
-  const regex =
-    language === 'english'
-      ? /([A-Z]{2,}_[0-9]+)\s+([^,\n]+?)\s*,\s*([A-Za-z0-9-]+)/g
-      : /(G\d+)\s+([^,\n]+?)\s*,\s*([A-Za-z0-9-]+)/gi;
-  let match = regex.exec(content);
-  while (match) {
-    entries.push({
-      code: cleanCell(match[1]).toUpperCase(),
-      teacher: cleanCell(match[2]),
-      room: cleanCell(match[3]),
-    });
-    match = regex.exec(content);
-  }
+  lines.forEach((line) => {
+    const parsed = parseLanguageLine(line, language);
+    if (parsed) entries.push(parsed);
+  });
   return { header, entries };
 };
 
@@ -457,6 +492,17 @@ const pickEnglishEntry = (cell, groupInput, major) => {
   return candidates[0] || null;
 };
 
+const isEntryVisibleForClass = (entry, grade, major) => {
+  if (!entry) return false;
+  const normalizedCode = cleanCell(entry.code).toUpperCase();
+  if (!normalizedCode || !grade) return true;
+  if (!normalizedCode.includes(String(grade))) return false;
+  if (!major) return true;
+  const normalizedMajor = cleanCell(major).toUpperCase();
+  if (!normalizedMajor) return true;
+  return normalizedCode.includes(normalizedMajor);
+};
+
 export const buildPreciseLanguageEvents = ({
   workbook,
   grade,
@@ -471,73 +517,147 @@ export const buildPreciseLanguageEvents = ({
   const events = [];
   const englishSlots = languageSlots.filter((slot) => slot.language === 'english');
   const germanSlots = languageSlots.filter((slot) => slot.language === 'german');
+  const useGroups = String(grade) === '2025';
 
   if (englishSlots.length) {
-    const englishSheetName = findLanguageSheetName(workbook, grade, 'english');
-    if (!englishSheetName) {
-      notes.push('未找到英语分组工作表，英语课程未加入。');
-    } else if (!cleanCell(englishGroup)) {
-      notes.push('未填写英语分组，英语课程未加入。');
-    } else {
-      const englishMap = parseLanguageSheet(workbook.Sheets[englishSheetName], 'english');
-      let matchedCount = 0;
-      englishSlots.forEach((slot) => {
-        const cell = englishMap.get(`${slot.sessionKey}|${slot.weekday}`);
-        const entry = pickEnglishEntry(cell, englishGroup, major);
-        if (!entry) return;
-        matchedCount += 1;
-        events.push({
-          summary: 'English',
-          location: entry.room,
-          description: [
-            `班级: ${classLabel}`,
-            `节次: ${slot.sessionLabel}`,
-            `分组: ${entry.code}`,
-            entry.teacher ? `教师: ${entry.teacher}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n'),
-          start: slot.start,
-          end: slot.end,
+    if (useGroups) {
+      const englishSheetName = findLanguageSheetName(workbook, grade, 'english');
+      if (!englishSheetName) {
+        notes.push('未找到英语工作表，英语课程未加入。');
+      } else if (!cleanCell(englishGroup)) {
+        notes.push('未填写英语分组，英语课程未加入。');
+      } else {
+        const englishMap = parseLanguageSheet(workbook.Sheets[englishSheetName], 'english');
+        let matchedCount = 0;
+        englishSlots.forEach((slot) => {
+          const cell = englishMap.get(`${slot.sessionKey}|${slot.weekday}`);
+          const entry = pickEnglishEntry(cell, englishGroup, major);
+          if (!entry) return;
+          matchedCount += 1;
+          events.push({
+            summary: 'English',
+            location: entry.room,
+            description: [
+              `班级: ${classLabel}`,
+              `节次: ${slot.sessionLabel}`,
+              entry.code ? `分组: ${entry.code}` : '',
+              entry.teacher ? `教师: ${entry.teacher}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            start: slot.start,
+            end: slot.end,
+          });
         });
-      });
-      if (!matchedCount) {
-        notes.push('英语分组未匹配到课程，请检查专业和分组填写。');
+        if (!matchedCount) notes.push('英语分组未匹配到课程，请检查专业和分组填写。');
+      }
+    } else {
+      const englishSheets = findLanguageSheets(workbook, 'english').filter(
+        (name) => !shouldSkipLanguageSheet(name)
+      );
+      if (!englishSheets.length) {
+        notes.push('未找到英语工作表，英语课程未加入。');
+      } else {
+        const englishMaps = englishSheets.map((name) =>
+          parseLanguageSheet(workbook.Sheets[name], 'english')
+        );
+        let matchedCount = 0;
+        englishSlots.forEach((slot) => {
+          englishMaps.forEach((englishMap) => {
+            const cell = englishMap.get(`${slot.sessionKey}|${slot.weekday}`);
+            if (!cell?.entries?.length) return;
+            cell.entries.forEach((entry) => {
+              if (!isEntryVisibleForClass(entry, grade, major)) return;
+              matchedCount += 1;
+              events.push({
+                summary: 'English',
+                location: entry.room,
+                description: [
+                  `班级: ${classLabel}`,
+                  `节次: ${slot.sessionLabel}`,
+                  entry.code ? `分组: ${entry.code}` : '',
+                  entry.teacher ? `教师: ${entry.teacher}` : '',
+                ]
+                  .filter(Boolean)
+                  .join('\n'),
+                start: slot.start,
+                end: slot.end,
+              });
+            });
+          });
+        });
+        if (!matchedCount) notes.push('英语课程未匹配到数据，请检查课表来源。');
       }
     }
   }
 
   if (germanSlots.length) {
-    const germanSheetName = findLanguageSheetName(workbook, grade, 'german');
-    if (!germanSheetName) {
-      notes.push('未找到德语分组工作表，德语课程未加入。');
-    } else if (!cleanCell(germanGroup)) {
-      notes.push('未填写德语分组，德语课程未加入。');
-    } else {
-      const germanMap = parseLanguageSheet(workbook.Sheets[germanSheetName], 'german');
-      let matchedCount = 0;
-      germanSlots.forEach((slot) => {
-        const cell = germanMap.get(`${slot.sessionKey}|${slot.weekday}`);
-        const entry = pickGermanEntry(cell, germanGroup, grade, major);
-        if (!entry) return;
-        matchedCount += 1;
-        events.push({
-          summary: 'German',
-          location: entry.room,
-          description: [
-            `班级: ${classLabel}`,
-            `节次: ${slot.sessionLabel}`,
-            `分组: ${entry.code}`,
-            entry.teacher ? `教师: ${entry.teacher}` : '',
-          ]
-            .filter(Boolean)
-            .join('\n'),
-          start: slot.start,
-          end: slot.end,
+    if (useGroups) {
+      const germanSheetName = findLanguageSheetName(workbook, grade, 'german');
+      if (!germanSheetName) {
+        notes.push('未找到德语工作表，德语课程未加入。');
+      } else if (!cleanCell(germanGroup)) {
+        notes.push('未填写德语分组，德语课程未加入。');
+      } else {
+        const germanMap = parseLanguageSheet(workbook.Sheets[germanSheetName], 'german');
+        let matchedCount = 0;
+        germanSlots.forEach((slot) => {
+          const cell = germanMap.get(`${slot.sessionKey}|${slot.weekday}`);
+          const entry = pickGermanEntry(cell, germanGroup, grade, major);
+          if (!entry) return;
+          matchedCount += 1;
+          events.push({
+            summary: 'German',
+            location: entry.room,
+            description: [
+              `班级: ${classLabel}`,
+              `节次: ${slot.sessionLabel}`,
+              entry.code ? `分组: ${entry.code}` : '',
+              entry.teacher ? `教师: ${entry.teacher}` : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            start: slot.start,
+            end: slot.end,
+          });
         });
-      });
-      if (!matchedCount) {
-        notes.push('德语分组未匹配到课程，请检查专业和分组填写。');
+        if (!matchedCount) notes.push('德语分组未匹配到课程，请检查专业和分组填写。');
+      }
+    } else {
+      const germanSheets = findLanguageSheets(workbook, 'german').filter(
+        (name) => !shouldSkipLanguageSheet(name)
+      );
+      if (!germanSheets.length) {
+        notes.push('未找到德语工作表，德语课程未加入。');
+      } else {
+        const germanMaps = germanSheets.map((name) =>
+          parseLanguageSheet(workbook.Sheets[name], 'german')
+        );
+        let matchedCount = 0;
+        germanSlots.forEach((slot) => {
+          let picked = null;
+          for (const germanMap of germanMaps) {
+            const cell = germanMap.get(`${slot.sessionKey}|${slot.weekday}`);
+            if (!cell?.entries?.length) continue;
+            const entry = cell.entries.find((item) =>
+              isEntryVisibleForClass(item, grade, major)
+            );
+            if (entry) {
+              picked = entry;
+              break;
+            }
+          }
+          if (!picked) return;
+          matchedCount += 1;
+          events.push({
+            summary: 'German',
+            location: '',
+            description: [`班级: ${classLabel}`, `节次: ${slot.sessionLabel}`].join('\n'),
+            start: slot.start,
+            end: slot.end,
+          });
+        });
+        if (!matchedCount) notes.push('德语课程未匹配到数据，请检查课表来源。');
       }
     }
   }
