@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 
-export const DEFAULT_FILE = '/Timetable_2026Spring.xlsx';
+export const DEFAULT_FILE = `${import.meta.env.BASE_URL}Timetable_2026Spring.xlsx`;
 export const FIXED_YEAR = 2026;
 export const STANDARD_TIME_SLOTS = [
   { id: '1', label: '第1节', start: '08:30', end: '10:00' },
