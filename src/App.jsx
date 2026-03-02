@@ -195,29 +195,32 @@ export default function App() {
     );
   }, [classSheets, selectedGrade, selectedMajor, selectedClass]);
 
-  const shouldUseLanguageGroups = selectedGrade === '2025';
+  const shouldUseEnglishGroups = selectedGrade === '2025';
+  const shouldUseGermanGroups = selectedGrade === '2025' || selectedGrade === '2024';
 
   const englishSheetName = useMemo(
-    () => (shouldUseLanguageGroups ? findLanguageSheetName(workbook, selectedGrade, 'english') : ''),
-    [workbook, selectedGrade, shouldUseLanguageGroups]
+    () =>
+      shouldUseEnglishGroups ? findLanguageSheetName(workbook, selectedGrade, 'english') : '',
+    [workbook, selectedGrade, shouldUseEnglishGroups]
   );
   const germanSheetName = useMemo(
-    () => (shouldUseLanguageGroups ? findLanguageSheetName(workbook, selectedGrade, 'german') : ''),
-    [workbook, selectedGrade, shouldUseLanguageGroups]
+    () =>
+      shouldUseGermanGroups ? findLanguageSheetName(workbook, selectedGrade, 'german') : '',
+    [workbook, selectedGrade, shouldUseGermanGroups]
   );
 
   const englishLanguageMap = useMemo(() => {
-    if (!shouldUseLanguageGroups || !workbook || !englishSheetName) return new Map();
+    if (!shouldUseEnglishGroups || !workbook || !englishSheetName) return new Map();
     return parseLanguageSheet(workbook.Sheets[englishSheetName], 'english');
-  }, [workbook, englishSheetName, shouldUseLanguageGroups]);
+  }, [workbook, englishSheetName, shouldUseEnglishGroups]);
 
   const germanLanguageMap = useMemo(() => {
-    if (!shouldUseLanguageGroups || !workbook || !germanSheetName) return new Map();
+    if (!shouldUseGermanGroups || !workbook || !germanSheetName) return new Map();
     return parseLanguageSheet(workbook.Sheets[germanSheetName], 'german');
-  }, [workbook, germanSheetName, shouldUseLanguageGroups]);
+  }, [workbook, germanSheetName, shouldUseGermanGroups]);
 
   const englishGroupOptions = useMemo(() => {
-    if (!shouldUseLanguageGroups) return [];
+    if (!shouldUseEnglishGroups) return [];
     const options = new Set();
     englishLanguageMap.forEach((cell) => {
       cell.entries.forEach((entry) => {
@@ -227,10 +230,10 @@ export default function App() {
       });
     });
     return sortNumericStrings(options);
-  }, [englishLanguageMap, selectedMajor, shouldUseLanguageGroups]);
+  }, [englishLanguageMap, selectedMajor, shouldUseEnglishGroups]);
 
   const germanGroupOptions = useMemo(() => {
-    if (!shouldUseLanguageGroups) return [];
+    if (!shouldUseGermanGroups) return [];
     const options = new Set();
     const majorToken = `${String(selectedGrade)}${String(selectedMajor || '').toUpperCase()}`;
     germanLanguageMap.forEach((cell) => {
@@ -244,7 +247,7 @@ export default function App() {
       });
     });
     return sortNumericStrings(options);
-  }, [germanLanguageMap, selectedGrade, selectedMajor, shouldUseLanguageGroups]);
+  }, [germanLanguageMap, selectedGrade, selectedMajor, shouldUseGermanGroups]);
 
 
 
@@ -436,20 +439,20 @@ export default function App() {
   }, [classOptions, selectedClass]);
 
   useEffect(() => {
-    if (!shouldUseLanguageGroups) return;
+    if (!shouldUseGermanGroups) return;
     if (!germanGroupOptions.length) return;
     if (!germanGroup || !germanGroupOptions.includes(germanGroup)) {
       setGermanGroup(germanGroupOptions[0]);
     }
-  }, [germanGroupOptions, germanGroup, shouldUseLanguageGroups]);
+  }, [germanGroupOptions, germanGroup, shouldUseGermanGroups]);
 
   useEffect(() => {
-    if (!shouldUseLanguageGroups) return;
+    if (!shouldUseEnglishGroups) return;
     if (!englishGroupOptions.length) return;
     if (!englishGroup || !englishGroupOptions.includes(englishGroup)) {
       setEnglishGroup(englishGroupOptions[0]);
     }
-  }, [englishGroupOptions, englishGroup, shouldUseLanguageGroups]);
+  }, [englishGroupOptions, englishGroup, shouldUseEnglishGroups]);
 
   useEffect(() => {
     if (!workbook || !selectedSheet) {
@@ -470,14 +473,21 @@ export default function App() {
       major: selectedSheet.major,
       classLabel: selectedSheet.sheetName,
       languageSlots: parsed.languageSlots,
-      englishGroup: shouldUseLanguageGroups ? englishGroup : '',
-      germanGroup: shouldUseLanguageGroups ? germanGroup : '',
+      englishGroup: shouldUseEnglishGroups ? englishGroup : '',
+      germanGroup: shouldUseGermanGroups ? germanGroup : '',
     });
 
     setEvents([...parsed.events, ...precise.events].sort((a, b) => a.start - b.start));
     setSessions(parsed.sessions);
     setLanguageNotes(precise.notes);
-  }, [workbook, selectedSheet, englishGroup, germanGroup, shouldUseLanguageGroups]);
+  }, [
+    workbook,
+    selectedSheet,
+    englishGroup,
+    germanGroup,
+    shouldUseEnglishGroups,
+    shouldUseGermanGroups,
+  ]);
 
   useEffect(() => {
     if (!weekOptions.length) {
@@ -732,30 +742,40 @@ export default function App() {
                 ))}
               </select>
             </label>
-            {shouldUseLanguageGroups ? (
+            {shouldUseGermanGroups || shouldUseEnglishGroups ? (
               <>
-                <label>
-                  <span>德语分组</span>
-                  <select value={germanGroup} onChange={(event) => setGermanGroup(event.target.value)}>
-                    <option value="">{germanGroupOptions.length ? '请选择' : '无可选分组'}</option>
-                    {germanGroupOptions.map((groupNo) => (
-                      <option key={groupNo} value={groupNo}>
-                        {groupNo}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  <span>英语分组</span>
-                  <select value={englishGroup} onChange={(event) => setEnglishGroup(event.target.value)}>
-                    <option value="">{englishGroupOptions.length ? '请选择' : '无可选分组'}</option>
-                    {englishGroupOptions.map((groupNo) => (
-                      <option key={groupNo} value={groupNo}>
-                        {groupNo}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {shouldUseGermanGroups ? (
+                  <label>
+                    <span>德语分组</span>
+                    <select
+                      value={germanGroup}
+                      onChange={(event) => setGermanGroup(event.target.value)}
+                    >
+                      <option value="">{germanGroupOptions.length ? '请选择' : '无可选分组'}</option>
+                      {germanGroupOptions.map((groupNo) => (
+                        <option key={groupNo} value={groupNo}>
+                          {groupNo}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {shouldUseEnglishGroups ? (
+                  <label>
+                    <span>英语分组</span>
+                    <select
+                      value={englishGroup}
+                      onChange={(event) => setEnglishGroup(event.target.value)}
+                    >
+                      <option value="">{englishGroupOptions.length ? '请选择' : '无可选分组'}</option>
+                      {englishGroupOptions.map((groupNo) => (
+                        <option key={groupNo} value={groupNo}>
+                          {groupNo}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
               </>
             ) : null}
           </div>

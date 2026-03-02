@@ -346,6 +346,24 @@ const findLanguageSheets = (workbook, language) => {
 
 const shouldSkipLanguageSheet = (name) => /2025/.test(String(name || ''));
 
+const parseGermanLetterGroupLine = (clean) => {
+  if (!/german/i.test(clean)) return null;
+  const withoutPrefix = clean.replace(/^german\s*[-\s]*/i, '');
+  const lastDash = withoutPrefix.lastIndexOf('-');
+  if (lastDash === -1) return null;
+  const room = cleanCell(withoutPrefix.slice(lastDash + 1));
+  const before = cleanCell(withoutPrefix.slice(0, lastDash));
+  if (!room || !before) return null;
+  const match = before.match(/^([0-9]{4}[A-Z]+)\s*[-\s]*([A-D])\s*[-\s]+(.+)$/i);
+  if (!match) return null;
+  const [, majorToken, groupLetter, teacher] = match;
+  return {
+    code: `${majorToken}-${groupLetter.toUpperCase()}`,
+    teacher: cleanCell(teacher),
+    room,
+  };
+};
+
 const parseLanguageLine = (line, language) => {
   const clean = cleanCell(line);
   if (!clean) return null;
@@ -366,6 +384,8 @@ const parseLanguageLine = (line, language) => {
     };
   }
   if (language === 'german' && /german/i.test(clean)) {
+    const letterParsed = parseGermanLetterGroupLine(clean);
+    if (letterParsed) return letterParsed;
     const parts = clean
       .split('-')
       .map((part) => cleanCell(part))
@@ -444,18 +464,33 @@ export const extractGroupNumber = (code, language) => {
   if (!normalized) return '';
   if (language === 'german') {
     const match = normalized.match(/^G(\d+)$/);
-    return match ? match[1] : '';
+    if (match) return match[1];
+    const letterMatch = normalized.match(/-([A-D])$/);
+    return letterMatch ? letterMatch[1] : '';
   }
   const match = normalized.match(/_(\d+)$/);
   return match ? match[1] : '';
 };
 
-export const sortNumericStrings = (values) =>
-  [...values].sort((a, b) => Number(a) - Number(b));
+export const sortNumericStrings = (values) => {
+  return [...values].sort((a, b) => {
+    const aText = cleanCell(a);
+    const bText = cleanCell(b);
+    const aNum = Number(aText);
+    const bNum = Number(bText);
+    const aIsNum = aText !== '' && Number.isFinite(aNum);
+    const bIsNum = bText !== '' && Number.isFinite(bNum);
+    if (aIsNum && bIsNum) return aNum - bNum;
+    if (aIsNum) return -1;
+    if (bIsNum) return 1;
+    return aText.localeCompare(bText);
+  });
+};
 
 const normalizeGermanGroup = (input) => {
   const raw = cleanCell(input).toUpperCase();
   if (!raw) return '';
+  if (/^[A-D]$/.test(raw)) return raw;
   return raw.startsWith('G') ? raw : `G${raw}`;
 };
 
@@ -468,7 +503,20 @@ const pickGermanEntry = (cell, groupInput, grade, major) => {
     const majorToken = `${String(grade)}${cleanCell(major).toUpperCase()}`;
     if (majorToken && !header.includes(majorToken)) return null;
   }
-  return cell.entries.find((entry) => entry.code === groupCode) || null;
+  if (/^G\d+$/i.test(groupCode)) {
+    return cell.entries.find((entry) => entry.code === groupCode) || null;
+  }
+  const majorToken = major
+    ? `${String(grade)}${cleanCell(major).toUpperCase()}`
+    : String(grade || '');
+  return (
+    cell.entries.find((entry) => {
+      const code = cleanCell(entry.code).toUpperCase();
+      if (!code.endsWith(`-${groupCode}`)) return false;
+      if (majorToken && !code.includes(majorToken)) return false;
+      return true;
+    }) || null
+  );
 };
 
 const pickEnglishEntry = (cell, groupInput, major) => {
@@ -517,10 +565,11 @@ export const buildPreciseLanguageEvents = ({
   const events = [];
   const englishSlots = languageSlots.filter((slot) => slot.language === 'english');
   const germanSlots = languageSlots.filter((slot) => slot.language === 'german');
-  const useGroups = String(grade) === '2025';
+  const useEnglishGroups = String(grade) === '2025';
+  const useGermanGroups = String(grade) === '2025' || String(grade) === '2024';
 
   if (englishSlots.length) {
-    if (useGroups) {
+    if (useEnglishGroups) {
       const englishSheetName = findLanguageSheetName(workbook, grade, 'english');
       if (!englishSheetName) {
         notes.push('未找到英语工作表，英语课程未加入。');
@@ -592,7 +641,7 @@ export const buildPreciseLanguageEvents = ({
   }
 
   if (germanSlots.length) {
-    if (useGroups) {
+    if (useGermanGroups) {
       const germanSheetName = findLanguageSheetName(workbook, grade, 'german');
       if (!germanSheetName) {
         notes.push('未找到德语工作表，德语课程未加入。');
@@ -657,7 +706,9 @@ export const buildPreciseLanguageEvents = ({
             end: slot.end,
           });
         });
-        if (!matchedCount) notes.push('德语课程未匹配到数据，请检查课表来源。');
+        if (!matchedCount && String(grade) !== '2023') {
+          notes.push('德语课程未匹配到数据，请检查课表来源。');
+        }
       }
     }
   }
