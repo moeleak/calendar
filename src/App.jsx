@@ -261,14 +261,30 @@ export default function App() {
     return [...keys.values()].sort((a, b) => a - b);
   }, [events]);
 
+  const today = new Date();
+  const todayWeekKey = getWeekKey(today);
+
   const selectedWeekIndex = useMemo(() => {
     return weekOptions.findIndex((week) => getWeekKey(week) === selectedWeek);
   }, [weekOptions, selectedWeek]);
 
+  const todayWeekIndex = useMemo(() => {
+    return weekOptions.findIndex((week) => getWeekKey(week) === todayWeekKey);
+  }, [weekOptions, todayWeekKey]);
+
+  const resolvedWeekIndex = useMemo(() => {
+    if (selectedWeekIndex >= 0) return selectedWeekIndex;
+    if (todayWeekIndex >= 0) return todayWeekIndex;
+    return weekOptions.length ? 0 : -1;
+  }, [selectedWeekIndex, todayWeekIndex, weekOptions.length]);
+
   const selectedWeekStart = useMemo(() => {
-    if (selectedWeekIndex >= 0) return weekOptions[selectedWeekIndex];
-    return weekOptions[0] || null;
-  }, [selectedWeekIndex, weekOptions]);
+    if (resolvedWeekIndex >= 0) return weekOptions[resolvedWeekIndex];
+    return null;
+  }, [resolvedWeekIndex, weekOptions]);
+
+  const resolvedWeekKey = selectedWeekStart ? getWeekKey(selectedWeekStart) : '';
+  const isViewingCurrentWeek = resolvedWeekKey === todayWeekKey;
 
   const weeklyEvents = useMemo(() => {
     if (!selectedWeekStart) return [];
@@ -307,8 +323,12 @@ export default function App() {
     return map;
   }, [weeklyEvents]);
 
-  const displayDate = selectedWeekStart ? formatDisplayDate(selectedWeekStart) : formatDisplayDate(new Date());
-  const displayWeekNo = selectedWeekIndex >= 0 ? selectedWeekIndex + 1 : 1;
+  const displayDate = isViewingCurrentWeek
+    ? formatDisplayDate(today)
+    : selectedWeekStart
+      ? formatDisplayDate(selectedWeekStart)
+      : formatDisplayDate(today);
+  const displayWeekNo = resolvedWeekIndex >= 0 ? resolvedWeekIndex + 1 : 1;
 
   const applyDragOffset = (value) => {
     dragOffsetRef.current = value;
@@ -316,9 +336,9 @@ export default function App() {
   };
 
   const shiftWeek = (offset) => {
-    if (!weekOptions.length || selectedWeekIndex < 0) return false;
-    const target = Math.max(0, Math.min(weekOptions.length - 1, selectedWeekIndex + offset));
-    if (target === selectedWeekIndex) return false;
+    if (!weekOptions.length || resolvedWeekIndex < 0) return false;
+    const target = Math.max(0, Math.min(weekOptions.length - 1, resolvedWeekIndex + offset));
+    if (target === resolvedWeekIndex) return false;
     setSelectedWeek(getWeekKey(weekOptions[target]));
     return true;
   };
@@ -350,8 +370,8 @@ export default function App() {
 
     if (!swipeRef.current.horizontal) return;
 
-    const canShiftPrev = selectedWeekIndex > 0;
-    const canShiftNext = selectedWeekIndex >= 0 && selectedWeekIndex < weekOptions.length - 1;
+    const canShiftPrev = resolvedWeekIndex > 0;
+    const canShiftNext = resolvedWeekIndex >= 0 && resolvedWeekIndex < weekOptions.length - 1;
     let displayDx = dx;
     if ((dx > 0 && !canShiftPrev) || (dx < 0 && !canShiftNext)) {
       displayDx *= 0.35;
@@ -521,7 +541,7 @@ export default function App() {
       selectedClass,
       germanGroup,
       englishGroup,
-      selectedWeek: weekOptions.length ? selectedWeek : previous.selectedWeek || selectedWeek,
+      selectedWeek: weekOptions.length ? resolvedWeekKey : previous.selectedWeek || selectedWeek,
     });
   }, [
     selectedGrade,
@@ -530,6 +550,7 @@ export default function App() {
     germanGroup,
     englishGroup,
     selectedWeek,
+    resolvedWeekKey,
     weekOptions.length,
   ]);
 
@@ -803,7 +824,7 @@ export default function App() {
           <div className="week-list">
             {weekOptions.map((week, index) => {
               const key = getWeekKey(week);
-              const active = key === selectedWeek;
+              const active = key === resolvedWeekKey;
               return (
                 <button
                   key={key}
