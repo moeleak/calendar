@@ -364,6 +364,24 @@ const parseGermanLetterGroupLine = (clean) => {
   };
 };
 
+const ENGLISH_LINE_ENTRY_REGEX = /([A-Z]{2,}_[0-9]+)\s+([^,\n]+?)\s*,\s*([A-Za-z0-9-]+)/g;
+const GERMAN_LINE_ENTRY_REGEX = /(G\d+)\s+([^,\n]+?)\s*,\s*([A-Za-z0-9-]+)/gi;
+
+const extractRegexEntries = (line, regex) => {
+  regex.lastIndex = 0;
+  const entries = [];
+  let match = regex.exec(line);
+  while (match) {
+    entries.push({
+      code: cleanCell(match[1]).toUpperCase(),
+      teacher: cleanCell(match[2]),
+      room: cleanCell(match[3]),
+    });
+    match = regex.exec(line);
+  }
+  return entries;
+};
+
 const parseLanguageLine = (line, language) => {
   const clean = cleanCell(line);
   if (!clean) return null;
@@ -401,6 +419,21 @@ const parseLanguageLine = (line, language) => {
   return null;
 };
 
+const extractLanguageEntriesFromLine = (line, language) => {
+  const clean = cleanCell(line);
+  if (!clean) return [];
+  if (language === 'english') {
+    const englishEntries = extractRegexEntries(clean, ENGLISH_LINE_ENTRY_REGEX);
+    if (englishEntries.length) return englishEntries;
+  }
+  if (language === 'german') {
+    const germanEntries = extractRegexEntries(clean, GERMAN_LINE_ENTRY_REGEX);
+    if (germanEntries.length) return germanEntries;
+  }
+  const parsed = parseLanguageLine(clean, language);
+  return parsed ? [parsed] : [];
+};
+
 const parseLanguageEntries = (text, language) => {
   const content = String(text || '').replace(/\r/g, '\n');
   const lines = content
@@ -411,8 +444,7 @@ const parseLanguageEntries = (text, language) => {
     lines.find((line) => /20\d{2}/.test(line) && line.includes('&')) || '';
   const entries = [];
   lines.forEach((line) => {
-    const parsed = parseLanguageLine(line, language);
-    if (parsed) entries.push(parsed);
+    entries.push(...extractLanguageEntriesFromLine(line, language));
   });
   return { header, entries };
 };
