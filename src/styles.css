@@ -115,7 +115,7 @@ select {
 
 .timetable-main {
   min-width: 0;
-  touch-action: pan-y;
+  touch-action: pan-y pinch-zoom;
 }
 
 .swipe-tip {
@@ -130,15 +130,31 @@ select {
   border-radius: 12px;
   background: var(--md-surface);
   width: 100%;
+  overscroll-behavior: contain;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .swipe-track {
   will-change: transform;
-  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition:
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 220ms ease;
 }
 
 .swipe-track.dragging {
   transition: none;
+  filter: saturate(1.04);
+}
+
+.swipe-track.animating {
+  filter: saturate(1.02);
+}
+
+.swipe-track.dragging .schedule-table {
+  pointer-events: none;
 }
 
 .schedule-table {

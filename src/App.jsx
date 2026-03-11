@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_FILE,
   FIXED_YEAR,
@@ -58,6 +58,14 @@ const formatMetaDate = (value) => {
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) return '未知';
   return parsed.toLocaleString('zh-CN', { hour12: false });
+};
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const applySwipeResistance = (distance, limit, resistance = 0.18) => {
+  const absolute = Math.abs(distance);
+  if (absolute <= limit) return distance;
+  return Math.sign(distance) * (limit + (absolute - limit) * resistance);
 };
 
 function Modal({ title, onClose, children, actions, panelClassName = '' }) {
@@ -123,6 +131,12 @@ export default function App() {
   const firstRunPromptedRef = useRef(false);
   const weekInitRef = useRef(false);
   const swipeRef = useRef(null);
+  const swipeSurfaceRef = useRef(null);
+  const swipeAnimationRef = useRef({
+    exitTimer: 0,
+    settleTimer: 0,
+    rafId: 0,
+  });
   const dragOffsetRef = useRef(0);
 
   const [workbook, setWorkbook] = useState(null);
@@ -147,6 +161,7 @@ export default function App() {
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [isSwipeAnimating, setIsSwipeAnimating] = useState(false);
 
   const classSheets = useMemo(() => {
     if (!workbook) return [];
@@ -330,25 +345,97 @@ export default function App() {
       : formatDisplayDate(today);
   const displayWeekNo = resolvedWeekIndex >= 0 ? resolvedWeekIndex + 1 : 1;
 
+  const clearSwipeAnimation = useCallback(() => {
+    const animation = swipeAnimationRef.current;
+    if (animation.exitTimer) {
+      window.clearTimeout(animation.exitTimer);
+      animation.exitTimer = 0;
+    }
+    if (animation.settleTimer) {
+      window.clearTimeout(animation.settleTimer);
+      animation.settleTimer = 0;
+    }
+    if (animation.rafId) {
+      window.cancelAnimationFrame(animation.rafId);
+      animation.rafId = 0;
+    }
+  }, []);
+
+  const getSwipeMetrics = useCallback(() => {
+    const width =
+      swipeSurfaceRef.current?.clientWidth ||
+      (typeof window !== 'undefined' ? window.innerWidth : 360) ||
+      360;
+    const travel = clamp(width * 0.36, 132, 220);
+    return {
+      maxDrag: clamp(width * 0.24, 92, 164),
+      edgeDrag: clamp(width * 0.14, 54, 92),
+      triggerOffset: clamp(width * 0.18, 56, 104),
+      exitOffset: travel,
+      enterOffset: Math.round(travel * 0.68),
+      velocityThreshold: 0.42,
+    };
+  }, []);
+
+  const resolveShiftTargetIndex = useCallback(
+    (offset) => {
+      if (!weekOptions.length || resolvedWeekIndex < 0) return -1;
+      const target = clamp(resolvedWeekIndex + offset, 0, weekOptions.length - 1);
+      return target === resolvedWeekIndex ? -1 : target;
+    },
+    [resolvedWeekIndex, weekOptions.length]
+  );
+
   const applyDragOffset = (value) => {
     dragOffsetRef.current = value;
     setDragOffset(value);
   };
 
-  const shiftWeek = (offset) => {
-    if (!weekOptions.length || resolvedWeekIndex < 0) return false;
-    const target = Math.max(0, Math.min(weekOptions.length - 1, resolvedWeekIndex + offset));
-    if (target === resolvedWeekIndex) return false;
-    setSelectedWeek(getWeekKey(weekOptions[target]));
-    return true;
-  };
+  const queueSwipeWeekShift = useCallback(
+    (direction) => {
+      const targetIndex = resolveShiftTargetIndex(direction);
+      if (targetIndex < 0) return false;
+
+      const { enterOffset, exitOffset } = getSwipeMetrics();
+      const nextWeekKey = getWeekKey(weekOptions[targetIndex]);
+
+      clearSwipeAnimation();
+      setIsDragging(false);
+      setIsSwipeAnimating(true);
+      applyDragOffset(direction > 0 ? -exitOffset : exitOffset);
+
+      swipeAnimationRef.current.exitTimer = window.setTimeout(() => {
+        startTransition(() => setSelectedWeek(nextWeekKey));
+        applyDragOffset(direction > 0 ? enterOffset : -enterOffset);
+        swipeAnimationRef.current.rafId = window.requestAnimationFrame(() => {
+          swipeAnimationRef.current.rafId = window.requestAnimationFrame(() => {
+            applyDragOffset(0);
+            swipeAnimationRef.current.settleTimer = window.setTimeout(() => {
+              setIsSwipeAnimating(false);
+              swipeAnimationRef.current.settleTimer = 0;
+            }, 220);
+          });
+        });
+        swipeAnimationRef.current.exitTimer = 0;
+      }, 150);
+
+      return true;
+    },
+    [clearSwipeAnimation, getSwipeMetrics, resolveShiftTargetIndex, weekOptions]
+  );
 
   const handleSwipeStart = (event) => {
+    if (isSwipeAnimating || !event.touches?.length) return;
+    clearSwipeAnimation();
     if (!event.touches?.length) return;
     const touch = event.touches[0];
+    const now = performance.now();
     swipeRef.current = {
       x: touch.clientX,
       y: touch.clientY,
+      lastX: touch.clientX,
+      lastTime: now,
+      velocityX: 0,
       locked: false,
       horizontal: false,
     };
@@ -357,26 +444,41 @@ export default function App() {
   };
 
   const handleSwipeMove = (event) => {
-    if (!swipeRef.current || !event.touches?.length) return;
+    if (!swipeRef.current || isSwipeAnimating || !event.touches?.length) return;
     const touch = event.touches[0];
     const dx = touch.clientX - swipeRef.current.x;
     const dy = touch.clientY - swipeRef.current.y;
+    const now = performance.now();
+    const dt = Math.max(1, now - swipeRef.current.lastTime);
+    swipeRef.current.velocityX = (touch.clientX - swipeRef.current.lastX) / dt;
+    swipeRef.current.lastX = touch.clientX;
+    swipeRef.current.lastTime = now;
 
     if (!swipeRef.current.locked) {
-      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
       swipeRef.current.locked = true;
-      swipeRef.current.horizontal = Math.abs(dx) > Math.abs(dy);
+      if (Math.abs(dx) > Math.abs(dy) * 1.15) {
+        swipeRef.current.horizontal = true;
+      } else if (Math.abs(dy) > Math.abs(dx)) {
+        swipeRef.current.horizontal = false;
+      } else {
+        return;
+      }
     }
 
     if (!swipeRef.current.horizontal) return;
 
+    if (event.cancelable) event.preventDefault();
+
+    const { edgeDrag, maxDrag } = getSwipeMetrics();
     const canShiftPrev = resolvedWeekIndex > 0;
     const canShiftNext = resolvedWeekIndex >= 0 && resolvedWeekIndex < weekOptions.length - 1;
     let displayDx = dx;
     if ((dx > 0 && !canShiftPrev) || (dx < 0 && !canShiftNext)) {
-      displayDx *= 0.35;
+      displayDx = Math.sign(dx) * Math.min(edgeDrag, Math.abs(dx) * 0.32);
+    } else {
+      displayDx = applySwipeResistance(dx, maxDrag);
     }
-    displayDx = Math.max(-140, Math.min(140, displayDx));
 
     if (!isDragging) setIsDragging(true);
     applyDragOffset(displayDx);
@@ -389,11 +491,12 @@ export default function App() {
   };
 
   const handleSwipeEnd = (event) => {
-    if (!swipeRef.current || !event.changedTouches?.length) {
+    if (!swipeRef.current || isSwipeAnimating || !event.changedTouches?.length) {
       handleSwipeCancel();
       return;
     }
     const wasHorizontal = swipeRef.current.horizontal;
+    const velocityX = swipeRef.current.velocityX;
     swipeRef.current = null;
 
     if (!wasHorizontal) {
@@ -401,19 +504,28 @@ export default function App() {
       return;
     }
 
+    const { triggerOffset, velocityThreshold } = getSwipeMetrics();
     const finalOffset = dragOffsetRef.current;
-    const threshold = 56;
-    const direction = finalOffset <= -threshold ? 1 : finalOffset >= threshold ? -1 : 0;
-    const shifted = direction ? shiftWeek(direction) : false;
+    const enoughDistance = Math.abs(finalOffset) >= triggerOffset;
+    const enoughVelocity = Math.abs(velocityX) >= velocityThreshold;
+    const direction = enoughDistance
+      ? finalOffset < 0
+        ? 1
+        : -1
+      : enoughVelocity
+        ? velocityX < 0
+          ? 1
+          : -1
+        : 0;
+    const shifted = direction ? queueSwipeWeekShift(direction) : false;
 
     setIsDragging(false);
-    if (shifted) {
-      applyDragOffset(direction > 0 ? -84 : 84);
-      requestAnimationFrame(() => applyDragOffset(0));
-      return;
-    }
-    applyDragOffset(0);
+    if (!shifted) applyDragOffset(0);
   };
+
+  useEffect(() => {
+    return () => clearSwipeAnimation();
+  }, [clearSwipeAnimation]);
 
   useEffect(() => {
     const loadDefaultFile = async () => {
@@ -645,7 +757,8 @@ export default function App() {
           <>
             <p className="swipe-tip">左右滑动可切换周</p>
             <div
-              className={`table-scroll swipe-track ${isDragging ? 'dragging' : ''}`}
+              ref={swipeSurfaceRef}
+              className={`table-scroll swipe-track ${isDragging ? 'dragging' : ''} ${isSwipeAnimating ? 'animating' : ''}`.trim()}
               style={{ transform: `translate3d(${dragOffset}px, 0, 0)` }}
             >
               <table className="schedule-table">
