@@ -152,6 +152,8 @@ export default function App() {
     exitTimer: 0,
     settleTimer: 0,
     rafId: 0,
+    dragFrame: 0,
+    pendingOffset: 0,
   });
   const dragOffsetRef = useRef(0);
 
@@ -379,6 +381,10 @@ export default function App() {
       window.cancelAnimationFrame(animation.rafId);
       animation.rafId = 0;
     }
+    if (animation.dragFrame) {
+      window.cancelAnimationFrame(animation.dragFrame);
+      animation.dragFrame = 0;
+    }
   }, []);
 
   const getSwipeMetrics = useCallback(() => {
@@ -405,12 +411,29 @@ export default function App() {
     [resolvedWeekIndex, weekOptions.length]
   );
 
-  const applyDragOffset = (value) => {
+  const applyDragOffset = (value, immediate = false) => {
     dragOffsetRef.current = value;
+    swipeAnimationRef.current.pendingOffset = value;
     const surface = swipeSurfaceRef.current;
-    if (surface) {
+    if (!surface) return;
+
+    if (immediate) {
+      if (swipeAnimationRef.current.dragFrame) {
+        window.cancelAnimationFrame(swipeAnimationRef.current.dragFrame);
+        swipeAnimationRef.current.dragFrame = 0;
+      }
       surface.style.transform = `translate3d(${value}px, 0, 0)`;
+      return;
     }
+
+    if (swipeAnimationRef.current.dragFrame) return;
+    swipeAnimationRef.current.dragFrame = window.requestAnimationFrame(() => {
+      swipeAnimationRef.current.dragFrame = 0;
+      const nextSurface = swipeSurfaceRef.current;
+      if (nextSurface) {
+        nextSurface.style.transform = `translate3d(${swipeAnimationRef.current.pendingOffset}px, 0, 0)`;
+      }
+    });
   };
 
   const queueSwipeWeekShift = useCallback(
@@ -426,13 +449,13 @@ export default function App() {
       setIsDragging(false);
       setIsSwipeAnimating(true);
       triggerHapticFeedback(12);
-      applyDragOffset(targetOffset);
+      applyDragOffset(targetOffset, true);
 
       swipeAnimationRef.current.exitTimer = window.setTimeout(() => {
         startTransition(() => setSelectedWeek(nextWeekKey));
         swipeAnimationRef.current.rafId = window.requestAnimationFrame(() => {
           swipeAnimationRef.current.rafId = window.requestAnimationFrame(() => {
-            applyDragOffset(0);
+            applyDragOffset(0, true);
             swipeAnimationRef.current.settleTimer = window.setTimeout(() => {
               setIsSwipeAnimating(false);
               swipeAnimationRef.current.settleTimer = 0;
@@ -463,7 +486,7 @@ export default function App() {
       horizontal: false,
     };
     setIsDragging(false);
-    applyDragOffset(0);
+    applyDragOffset(0, true);
   };
 
   const handleSwipeMove = (event) => {
@@ -543,7 +566,7 @@ export default function App() {
     const shifted = direction ? queueSwipeWeekShift(direction) : false;
 
     setIsDragging(false);
-    if (!shifted) applyDragOffset(0);
+    if (!shifted) applyDragOffset(0, true);
   };
 
   useEffect(() => {
@@ -769,82 +792,84 @@ export default function App() {
 
       {error ? <div className="alert-banner">{error}</div> : null}
 
-      <main
-        className="timetable-main"
-        onTouchStart={handleSwipeStart}
-        onTouchMove={handleSwipeMove}
-        onTouchEnd={handleSwipeEnd}
-        onTouchCancel={handleSwipeCancel}
-      >
+      <main className="timetable-main">
         {events.length ? (
           <>
             <p className="swipe-tip">左右滑动可切换周</p>
             <div
-              ref={swipeSurfaceRef}
-              className={`table-scroll swipe-track ${isDragging ? 'dragging' : ''} ${isSwipeAnimating ? 'animating' : ''}`.trim()}
+              className="table-scroll"
+              onTouchStart={handleSwipeStart}
+              onTouchMove={handleSwipeMove}
+              onTouchEnd={handleSwipeEnd}
+              onTouchCancel={handleSwipeCancel}
             >
-              <table className="schedule-table">
-                <thead>
-                  <tr>
-                    <th className="session-head">节次</th>
-                    {weekColumns.map((column) => (
-                      <th
-                        key={`${column.weekday}-${column.date.toISOString()}`}
-                        className={column.isToday ? 'today-column-head' : ''}
-                        aria-current={column.isToday ? 'date' : undefined}
-                      >
-                        <span>{column.label}</span>
-                        <small>{formatMonthDay(column.date)}</small>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {STANDARD_TIME_SLOTS.map((slot) => (
-                    <tr key={slot.id}>
-                      <th className="session-cell">
-                        <strong>{slot.id}</strong>
-                        <span>{slot.start}</span>
-                        <span>{slot.end}</span>
-                      </th>
-                      {weekColumns.map((column) => {
-                        const key = `${column.weekday}|${slot.start}-${slot.end}`;
-                        const cellEvents = weeklyEventMap.get(key) || [];
-                        return (
-                          <td
-                            key={`${slot.id}-${column.weekday}`}
-                            className={column.isToday ? 'today-column-cell' : ''}
-                          >
-                            {cellEvents.length ? (
-                              <div className="course-stack">
-                                {cellEvents.map((event, index) => {
-                                  const tone = getCourseTone(event.summary);
-                                  const teacher = extractTeacherFromDescription(event.description);
-                                  return (
-                                    <article
-                                      className="course-card"
-                                      key={`${event.summary}-${index}-${event.start.getTime()}`}
-                                      style={{
-                                        backgroundColor: tone.bg,
-                                        borderColor: tone.border,
-                                        color: tone.text,
-                                      }}
-                                    >
-                                      <strong>{event.summary}</strong>
-                                      {event.location ? <p>@{event.location}</p> : null}
-                                      {teacher ? <p>{teacher}</p> : null}
-                                    </article>
-                                  );
-                                })}
-                              </div>
-                            ) : null}
-                          </td>
-                        );
-                      })}
+              <div
+                ref={swipeSurfaceRef}
+                className={`swipe-track ${isDragging ? 'dragging' : ''} ${isSwipeAnimating ? 'animating' : ''}`.trim()}
+              >
+                <table className="schedule-table">
+                  <thead>
+                    <tr>
+                      <th className="session-head">节次</th>
+                      {weekColumns.map((column) => (
+                        <th
+                          key={`${column.weekday}-${column.date.toISOString()}`}
+                          className={column.isToday ? 'today-column-head' : ''}
+                          aria-current={column.isToday ? 'date' : undefined}
+                        >
+                          <span>{column.label}</span>
+                          <small>{formatMonthDay(column.date)}</small>
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {STANDARD_TIME_SLOTS.map((slot) => (
+                      <tr key={slot.id}>
+                        <th className="session-cell">
+                          <strong>{slot.id}</strong>
+                          <span>{slot.start}</span>
+                          <span>{slot.end}</span>
+                        </th>
+                        {weekColumns.map((column) => {
+                          const key = `${column.weekday}|${slot.start}-${slot.end}`;
+                          const cellEvents = weeklyEventMap.get(key) || [];
+                          return (
+                            <td
+                              key={`${slot.id}-${column.weekday}`}
+                              className={column.isToday ? 'today-column-cell' : ''}
+                            >
+                              {cellEvents.length ? (
+                                <div className="course-stack">
+                                  {cellEvents.map((event, index) => {
+                                    const tone = getCourseTone(event.summary);
+                                    const teacher = extractTeacherFromDescription(event.description);
+                                    return (
+                                      <article
+                                        className="course-card"
+                                        key={`${event.summary}-${index}-${event.start.getTime()}`}
+                                        style={{
+                                          backgroundColor: tone.bg,
+                                          borderColor: tone.border,
+                                          color: tone.text,
+                                        }}
+                                      >
+                                        <strong>{event.summary}</strong>
+                                        {event.location ? <p>@{event.location}</p> : null}
+                                        {teacher ? <p>{teacher}</p> : null}
+                                      </article>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </>
         ) : (
