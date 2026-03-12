@@ -186,6 +186,14 @@ select {
   font-size: 13px;
 }
 
+.schedule-table thead th.today-column-head {
+  background:
+    linear-gradient(180deg, rgba(140, 206, 255, 0.22), rgba(140, 206, 255, 0.08)),
+    var(--md-surface-2);
+  color: #f4fbff;
+  box-shadow: inset 0 -2px 0 rgba(140, 206, 255, 0.95);
+}
+
 .schedule-table thead th span,
 .schedule-table thead th small {
   display: block;
@@ -194,6 +202,12 @@ select {
 .schedule-table thead th small {
   margin-top: 2px;
   font-size: 11px;
+}
+
+.schedule-table td.today-column-cell {
+  background:
+    linear-gradient(180deg, rgba(140, 206, 255, 0.06), rgba(140, 206, 255, 0.02)),
+    var(--md-surface);
 }
 
 .session-head {

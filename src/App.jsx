@@ -68,6 +68,11 @@ const applySwipeResistance = (distance, limit, resistance = 0.18) => {
   return Math.sign(distance) * (limit + (absolute - limit) * resistance);
 };
 
+const isSameDay = (left, right) =>
+  left.getFullYear() === right.getFullYear() &&
+  left.getMonth() === right.getMonth() &&
+  left.getDate() === right.getDate();
+
 const triggerHapticFeedback = (pattern = 10) => {
   if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
     return false;
@@ -170,7 +175,6 @@ export default function App() {
   const [isWeekPickerOpen, setIsWeekPickerOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
-  const [dragOffset, setDragOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isSwipeAnimating, setIsSwipeAnimating] = useState(false);
 
@@ -330,9 +334,14 @@ export default function App() {
     return weekdays.map((weekday) => {
       const date = new Date(monday);
       date.setDate(monday.getDate() + getWeekdayOffset(weekday));
-      return { weekday, label: WEEKDAY_LABEL_MAP[weekday], date };
+      return {
+        weekday,
+        label: WEEKDAY_LABEL_MAP[weekday],
+        date,
+        isToday: isViewingCurrentWeek && isSameDay(date, today),
+      };
     });
-  }, [selectedWeekStart, weeklyEvents]);
+  }, [isViewingCurrentWeek, selectedWeekStart, today, weeklyEvents]);
 
   const weeklyEventMap = useMemo(() => {
     const map = new Map();
@@ -398,7 +407,10 @@ export default function App() {
 
   const applyDragOffset = (value) => {
     dragOffsetRef.current = value;
-    setDragOffset(value);
+    const surface = swipeSurfaceRef.current;
+    if (surface) {
+      surface.style.transform = `translate3d(${value}px, 0, 0)`;
+    }
   };
 
   const queueSwipeWeekShift = useCallback(
@@ -770,14 +782,17 @@ export default function App() {
             <div
               ref={swipeSurfaceRef}
               className={`table-scroll swipe-track ${isDragging ? 'dragging' : ''} ${isSwipeAnimating ? 'animating' : ''}`.trim()}
-              style={{ transform: `translate3d(${dragOffset}px, 0, 0)` }}
             >
               <table className="schedule-table">
                 <thead>
                   <tr>
                     <th className="session-head">节次</th>
                     {weekColumns.map((column) => (
-                      <th key={`${column.weekday}-${column.date.toISOString()}`}>
+                      <th
+                        key={`${column.weekday}-${column.date.toISOString()}`}
+                        className={column.isToday ? 'today-column-head' : ''}
+                        aria-current={column.isToday ? 'date' : undefined}
+                      >
                         <span>{column.label}</span>
                         <small>{formatMonthDay(column.date)}</small>
                       </th>
@@ -796,7 +811,10 @@ export default function App() {
                         const key = `${column.weekday}|${slot.start}-${slot.end}`;
                         const cellEvents = weeklyEventMap.get(key) || [];
                         return (
-                          <td key={`${slot.id}-${column.weekday}`}>
+                          <td
+                            key={`${slot.id}-${column.weekday}`}
+                            className={column.isToday ? 'today-column-cell' : ''}
+                          >
                             {cellEvents.length ? (
                               <div className="course-stack">
                                 {cellEvents.map((event, index) => {
