@@ -68,6 +68,17 @@ const applySwipeResistance = (distance, limit, resistance = 0.18) => {
   return Math.sign(distance) * (limit + (absolute - limit) * resistance);
 };
 
+const triggerHapticFeedback = (pattern = 10) => {
+  if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') {
+    return false;
+  }
+  try {
+    return navigator.vibrate(pattern);
+  } catch {
+    return false;
+  }
+};
+
 function Modal({ title, onClose, children, actions, panelClassName = '' }) {
   const [isClosing, setIsClosing] = useState(false);
   const closeTimerRef = useRef(null);
@@ -366,13 +377,12 @@ export default function App() {
       swipeSurfaceRef.current?.clientWidth ||
       (typeof window !== 'undefined' ? window.innerWidth : 360) ||
       360;
-    const travel = clamp(width * 0.36, 132, 220);
+    const wallOffset = clamp(width * 0.2, 76, 112);
     return {
-      maxDrag: clamp(width * 0.24, 92, 164),
-      edgeDrag: clamp(width * 0.14, 54, 92),
-      triggerOffset: clamp(width * 0.18, 56, 104),
-      exitOffset: travel,
-      enterOffset: Math.round(travel * 0.68),
+      maxDrag: wallOffset,
+      edgeDrag: clamp(width * 0.12, 44, 76),
+      triggerOffset: clamp(width * 0.14, 48, 86),
+      wallOffset,
       velocityThreshold: 0.42,
     };
   }, []);
@@ -396,28 +406,29 @@ export default function App() {
       const targetIndex = resolveShiftTargetIndex(direction);
       if (targetIndex < 0) return false;
 
-      const { enterOffset, exitOffset } = getSwipeMetrics();
+      const { wallOffset } = getSwipeMetrics();
       const nextWeekKey = getWeekKey(weekOptions[targetIndex]);
+      const targetOffset = direction > 0 ? -wallOffset : wallOffset;
 
       clearSwipeAnimation();
       setIsDragging(false);
       setIsSwipeAnimating(true);
-      applyDragOffset(direction > 0 ? -exitOffset : exitOffset);
+      triggerHapticFeedback(12);
+      applyDragOffset(targetOffset);
 
       swipeAnimationRef.current.exitTimer = window.setTimeout(() => {
         startTransition(() => setSelectedWeek(nextWeekKey));
-        applyDragOffset(direction > 0 ? enterOffset : -enterOffset);
         swipeAnimationRef.current.rafId = window.requestAnimationFrame(() => {
           swipeAnimationRef.current.rafId = window.requestAnimationFrame(() => {
             applyDragOffset(0);
             swipeAnimationRef.current.settleTimer = window.setTimeout(() => {
               setIsSwipeAnimating(false);
               swipeAnimationRef.current.settleTimer = 0;
-            }, 220);
+            }, 240);
           });
         });
         swipeAnimationRef.current.exitTimer = 0;
-      }, 150);
+      }, 90);
 
       return true;
     },
